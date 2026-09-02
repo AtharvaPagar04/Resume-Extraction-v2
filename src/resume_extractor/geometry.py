@@ -40,6 +40,13 @@ class LayoutThresholds:
     min_horizontal_rule_ratio: float = 0.15  # rule length / page width
     min_vertical_rule_ratio: float = 0.15  # rule length / page height
     thin_rule_ratio: float = 0.01  # rule thickness / perpendicular page dimension
+    table_pseudo_tall_ratio: float = 0.70  # candidate height / page height
+    table_pseudo_wide_ratio: float = 0.85  # candidate width / page width
+    table_pseudo_area_ratio: float = 0.55  # candidate area / page area
+    table_row_correspondence_ratio: float = 0.50  # rows populated in >=2 columns / meaningful rows
+    table_column_overlap_ratio: float = 0.80  # smaller visual column width shared before raw columns coalesce
+    table_row_continuation_gap_ratio: float = 0.20  # continuation gap / median table text-cell height
+    aligned_band_min_row_support: int = 2  # distinct core rows before an aligned x-band is structural
 
 
 THRESHOLDS = LayoutThresholds()

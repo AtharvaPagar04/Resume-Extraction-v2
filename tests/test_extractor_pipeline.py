@@ -5,9 +5,10 @@ import pymupdf as fitz
 import pytest
 
 import resume_extractor.extractor as extractor_module
-from resume_extractor.extractor import _excluded, _table_lines, extract_pdf, split_pages
+from resume_extractor.extractor import extract_pdf, split_pages
 from resume_extractor.layout import LayoutLine
 from resume_extractor.pipeline import discover_pdfs, run_pipeline, write_raw
+from resume_extractor.tables import TableReconstructionResult
 
 
 def pdf(path: Path, pages=("Hello, world!",)) -> Path:
@@ -87,7 +88,7 @@ def test_page_failure_keeps_other_page_positions(tmp_path, monkeypatch):
         calls += 1
         if calls == 2:
             raise RuntimeError("synthetic page failure")
-        return [LayoutLine(str(calls), str(calls), (0, 0, 10, 10), 0, 0, (0, 0), (0,))], False, False
+        return [LayoutLine(str(calls), str(calls), (0, 0, 10, 10), 0, 0, (0, 0), (0,))], False, ()
 
     monkeypatch.setattr(extractor_module, "_page_lines", flaky_page_lines)
     raw = extract_pdf(path)
@@ -124,31 +125,11 @@ def test_malformed_and_javascript_links_are_skipped(tmp_path):
     assert raw.hyperlinks == [] and "MALFORMED_LINK_SKIPPED" in raw.extraction.warnings
 
 
-def test_table_flattening_and_exclusion_helpers():
-    class Table:
-        bbox = (0, 0, 100, 40)
-
-        @staticmethod
-        def extract():
-            return [["Skill", "Level"], ["Python", "Advanced"]]
-
-    class Page:
-        rect = type("Rect", (), {"width": 200})()
-
-        @staticmethod
-        def find_tables():
-            return type("Found", (), {"tables": [Table()]})()
-
-    lines, boxes, failed = _table_lines(Page(), 200)
-    assert not failed and lines[0].text == "Skill: Python | Level: Advanced" and boxes == [(0, 0, 100, 40)]
-    assert _excluded((10, 10, 90, 30), boxes[0])
-
-
 def test_table_failure_falls_back_without_document_failure(tmp_path, monkeypatch):
     path = pdf(tmp_path / "resume.pdf")
-    monkeypatch.setattr(extractor_module, "_table_lines", lambda *args: ([], [], True))
+    monkeypatch.setattr(extractor_module, "reconstruct_tables", lambda layout: TableReconstructionResult((), frozenset(), ("TABLE_RECONSTRUCTION_FALLBACK",), 1))
     raw = extract_pdf(path)
-    assert raw.extraction.success and "TABLE_EXTRACTION_FAILED" in raw.extraction.warnings
+    assert raw.extraction.success and "TABLE_RECONSTRUCTION_FALLBACK" in raw.extraction.warnings
 
 
 def test_raw_schema_is_exact_and_has_no_duplicate_text(tmp_path):
