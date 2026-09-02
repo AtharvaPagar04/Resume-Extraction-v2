@@ -9,6 +9,7 @@ from typing import Any
 import pymupdf as fitz
 
 from .layout import LayoutLine, order_lines
+from .layout_foundation import PageLayout, build_page_layout
 from .models import ExtractionStatus, RawHyperlink, RawResume, RawSource
 from .primitives import extract_fields, normalize_url
 from .reconstruction import reconstruct_line_from_spans
@@ -46,12 +47,15 @@ def _excluded(block_bbox: tuple[float, float, float, float], table_bbox: tuple[f
     return (x0 >= tx0 and y0 >= ty0 and x1 <= tx1 and y1 <= ty1) or intersection > 0.10 * max(1.0, _rect_area(block_bbox)) or (ty0 - 2 <= y0 and y1 <= ty1 + 2 and ix1 > ix0)
 
 
-def _table_lines(page: fitz.Page, page_width: float) -> tuple[list[LayoutLine], list[tuple[float, float, float, float]], bool]:
+def _table_lines(page: fitz.Page, page_width: float, table_candidates: tuple | None = None) -> tuple[list[LayoutLine], list[tuple[float, float, float, float]], bool]:
     try:
-        # Newer PyMuPDF releases can print an upgrade hint here; extraction stays quiet.
-        with contextlib.redirect_stdout(io.StringIO()):
-            found = page.find_tables()
-        tables = list(getattr(found, "tables", found))
+        if table_candidates is not None:
+            tables = [candidate.native_table for candidate in table_candidates if candidate.source == "pymupdf" and candidate.native_table is not None]
+        else:
+            # Compatibility path for direct callers; normal extraction reuses foundation candidates.
+            with contextlib.redirect_stdout(io.StringIO()):
+                found = page.find_tables()
+            tables = list(getattr(found, "tables", found))
     except Exception:
         return [], [], True
     output: list[LayoutLine] = []
@@ -77,33 +81,43 @@ def _table_lines(page: fitz.Page, page_width: float) -> tuple[list[LayoutLine], 
                 values = [((cell or "").replace("\n", " ").strip()) for cell in row]
                 text = " | ".join(f"{headers[index]}: {value}" for index, value in enumerate(values) if value)
                 if text:
-                    output.append(LayoutLine(text, (bbox[0], bbox[1] + row_index * row_height, bbox[2], bbox[1] + (row_index + 1) * row_height), -1000 - table_index, row_index, source_ids=()))
+                    output.append(LayoutLine(text, text, (bbox[0], bbox[1] + row_index * row_height, bbox[2], bbox[1] + (row_index + 1) * row_height), -1000 - table_index, row_index, (-1000 - table_index, row_index), (), is_table=True))
         except Exception:
             continue
     return output, boxes, False
 
 
-def _page_lines(page: fitz.Page) -> tuple[list[LayoutLine], bool, bool]:
-    table_lines, table_boxes, table_failed = _table_lines(page, page.rect.width)
+def _basic_page_lines(page: fitz.Page) -> list[LayoutLine]:
+    """Last-resort dict walk when derived geometry fails but text remains readable."""
     data = page.get_text("dict", flags=fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_PRESERVE_WHITESPACE)
-    lines: list[LayoutLine] = []
+    output: list[LayoutLine] = []
     source_id = 0
-    for block_index, block in enumerate(data.get("blocks", [])):
-        if block.get("type") != 0 or any(_excluded(tuple(block.get("bbox", (0, 0, 0, 0))), box) for box in table_boxes):
+    for block_index, block in enumerate(data.get("blocks", ())):
+        if block.get("type") != 0:
             continue
-        for line_index, line in enumerate(block.get("lines", [])):
-            text = reconstruct_line_from_spans(line.get("spans", []))
+        for line_index, raw_line in enumerate(block.get("lines", ())):
+            text = reconstruct_line_from_spans(list(raw_line.get("spans", ())))
             if not text:
                 continue
-            spans = line.get("spans", [])
-            first = spans[0] if spans else {}
-            lines.append(LayoutLine(text, tuple(line.get("bbox", (0, 0, 0, 0))), block_index, line_index, (float(first.get("size", 0) or 0), str(first.get("font", "")), int(first.get("flags", 0) or 0)), (source_id,)))
+            output.append(LayoutLine(text, text, tuple(float(value) for value in raw_line.get("bbox", (0, 0, 0, 0))), block_index, line_index, (block_index, line_index), (source_id,)))
             source_id += 1
+    return output
+
+
+def _page_lines(page: fitz.Page) -> tuple[list[LayoutLine], bool, bool]:
+    try:
+        page_layout: PageLayout = build_page_layout(page, 1)
+    except Exception:
+        return sorted(_basic_page_lines(page), key=lambda line: (line.y0, line.x0, line.block_index, line.line_index)), True, False
+    table_lines, table_boxes, table_failed = _table_lines(page, page.rect.width, page_layout.table_candidates)
+    block_boxes = {block.block_index: block.bbox for block in page_layout.blocks}
+    lines = [line for line in page_layout.lines if not any(_excluded(block_boxes[line.block_index], box) for box in table_boxes)]
+    source_id = len(lines)
     for table_line in table_lines:
-        lines.append(LayoutLine(table_line.text, table_line.bbox, table_line.block_index, table_line.line_index, table_line.style, (source_id,), True))
+        lines.append(LayoutLine(table_line.raw_text, table_line.reconstructed_text, table_line.bbox, table_line.block_index, table_line.line_index, table_line.source_order, (source_id,), is_table=True))
         source_id += 1
     ordered, fallback = order_lines(lines, page.rect.width, page.rect.height)
-    return ordered, fallback, table_failed
+    return ordered, fallback, table_failed or "TABLE_EXTRACTION_FAILED" in page_layout.warnings
 
 
 def _links(page: fitz.Page, page_number: int, warnings: list[str]) -> list[RawHyperlink]:

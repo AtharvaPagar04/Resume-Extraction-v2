@@ -2,7 +2,7 @@ from resume_extractor.layout import LayoutLine, order_lines
 
 
 def line(text, x0, y0, x1, y1, source_id):
-    return LayoutLine(text, (x0, y0, x1, y1), 0, source_id, source_ids=(source_id,))
+    return LayoutLine(text, text, (x0, y0, x1, y1), 0, source_id, (0, source_id), (source_id,))
 
 
 def texts(lines):

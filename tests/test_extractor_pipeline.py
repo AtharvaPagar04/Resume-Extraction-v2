@@ -87,7 +87,7 @@ def test_page_failure_keeps_other_page_positions(tmp_path, monkeypatch):
         calls += 1
         if calls == 2:
             raise RuntimeError("synthetic page failure")
-        return [LayoutLine(str(calls), (0, 0, 10, 10), 0, 0, source_ids=(0,))], False, False
+        return [LayoutLine(str(calls), str(calls), (0, 0, 10, 10), 0, 0, (0, 0), (0,))], False, False
 
     monkeypatch.setattr(extractor_module, "_page_lines", flaky_page_lines)
     raw = extract_pdf(path)
@@ -146,7 +146,7 @@ def test_table_flattening_and_exclusion_helpers():
 
 def test_table_failure_falls_back_without_document_failure(tmp_path, monkeypatch):
     path = pdf(tmp_path / "resume.pdf")
-    monkeypatch.setattr(extractor_module, "_table_lines", lambda page, width: ([], [], True))
+    monkeypatch.setattr(extractor_module, "_table_lines", lambda *args: ([], [], True))
     raw = extract_pdf(path)
     assert raw.extraction.success and "TABLE_EXTRACTION_FAILED" in raw.extraction.warnings
 

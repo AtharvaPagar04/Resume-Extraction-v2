@@ -69,4 +69,6 @@ resume-extract ./input --output ./output --overwrite
 
 The extractor uses PyMuPDF dictionary extraction, conservative span whitespace repair, geometry-based ordering with source-accounting fallback, optional deterministic table flattening, URI annotation retention, and syntactic contact/URL extraction. JSON is UTF-8 and atomically written.
 
+The shared internal geometry contract is documented in [layout_foundation.md](docs/layout_foundation.md). It retains spans, lines, blocks, drawings, annotation bounds, rows, anchors, gutters, regions, and table candidates only while a page is processed; RAW remains unchanged.
+
 Image-only PDFs receive `NEEDS_OCR`; OCR is not included. Pathological floating/overlapping layouts may receive `READING_ORDER_FALLBACK`. Tables are flattened and exact visual formatting is not preserved.

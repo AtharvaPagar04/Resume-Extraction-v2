@@ -1,45 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from statistics import median
 
-
-@dataclass(frozen=True)
-class LayoutLine:
-    text: str
-    bbox: tuple[float, float, float, float]
-    block_index: int
-    line_index: int
-    style: tuple[float, str, int] = (0.0, "", 0)
-    source_ids: tuple[int, ...] = ()
-    is_table: bool = False
-
-    @property
-    def x0(self) -> float:
-        return self.bbox[0]
-
-    @property
-    def y0(self) -> float:
-        return self.bbox[1]
-
-    @property
-    def x1(self) -> float:
-        return self.bbox[2]
-
-    @property
-    def y1(self) -> float:
-        return self.bbox[3]
-
-    @property
-    def width(self) -> float:
-        return max(0.0, self.x1 - self.x0)
-
-    @property
-    def height(self) -> float:
-        return max(1.0, self.y1 - self.y0)
-
-
-_BULLETS = {"•", "◦", "▪", "▫", "-", "–", "—", "*"}
+from .geometry import THRESHOLDS, same_row
+from .layout_foundation import LayoutLine, is_bullet_only
 
 
 def _basic(lines: list[LayoutLine]) -> list[LayoutLine]:
@@ -47,9 +12,7 @@ def _basic(lines: list[LayoutLine]) -> list[LayoutLine]:
 
 
 def _same_row(a: LayoutLine, b: LayoutLine, median_height: float) -> bool:
-    overlap = max(0.0, min(a.y1, b.y1) - max(a.y0, b.y0)) / min(a.height, b.height)
-    centers_close = abs((a.y0 + a.y1 - b.y0 - b.y1) / 2) <= 0.45 * max(median_height, a.height, b.height)
-    return overlap >= 0.45 or centers_close
+    return same_row(a.bbox, b.bbox, median_height)
 
 
 def _rows(lines: list[LayoutLine]) -> list[list[LayoutLine]]:
@@ -73,15 +36,15 @@ def _pair_bullets(lines: list[LayoutLine], page_width: float) -> list[LayoutLine
     for index, line in enumerate(ordered):
         if index in consumed:
             continue
-        if line.text.strip() not in _BULLETS:
+        if not is_bullet_only(line.text):
             paired.append(line)
             continue
         choices = [
             (candidate.x0 - line.x1, candidate_index, candidate)
             for candidate_index, candidate in enumerate(ordered[index + 1 :], index + 1)
             if candidate_index not in consumed
-            and 0 <= candidate.x0 - line.x1 <= 0.12 * page_width
-            and 0 <= candidate.y0 - line.y0 <= 1.8 * med
+            and 0 <= candidate.x0 - line.x1 <= THRESHOLDS.bullet_right_gap_ratio * page_width
+            and 0 <= candidate.y0 - line.y0 <= THRESHOLDS.continuation_vertical_gap_ratio * med
             and candidate.width > 0
         ]
         if not choices:
@@ -95,16 +58,16 @@ def _pair_bullets(lines: list[LayoutLine], page_width: float) -> list[LayoutLine
                 continue
             if following.block_index != candidate.block_index or following.style != candidate.style:
                 continue
-            if following.width >= 0.68 * page_width or following.y0 < last.y0 or following.y0 - last.y1 > 1.8 * med:
+            if following.width >= THRESHOLDS.full_width_ratio * page_width or following.y0 < last.y0 or following.y0 - last.y1 > THRESHOLDS.continuation_vertical_gap_ratio * med:
                 continue
-            if abs(following.x0 - candidate.x0) > 0.08 * page_width or following.x0 < last.x0 - 0.01 * page_width:
+            if abs(following.x0 - candidate.x0) > THRESHOLDS.continuation_indent_ratio * page_width or following.x0 < last.x0 - THRESHOLDS.continuation_backtrack_ratio * page_width:
                 continue
             continuation.append(following)
             consumed.add(following_index)
             last = following
         merged = replace(
             line,
-            text=f"{line.text.strip()} " + " ".join(item.text for item in continuation),
+            reconstructed_text=f"{line.text.strip()} " + " ".join(item.text for item in continuation),
             bbox=(line.x0, min(line.y0, candidate.y0), max(item.x1 for item in continuation), max(line.y1, last.y1)),
             source_ids=line.source_ids + tuple(source_id for item in continuation for source_id in item.source_ids),
         )
@@ -118,7 +81,7 @@ def _gutter(lines: list[LayoutLine], page_width: float) -> float | None:
     if len(starts) < 6:
         return None
     gap, left, right = max(((b - a, a, b) for a, b in zip(starts, starts[1:])), default=(0.0, 0.0, 0.0))
-    if gap < 0.08 * page_width:
+    if gap < THRESHOLDS.gutter_width_ratio * page_width:
         return None
     midpoint = (left + right) / 2
     if sum(line.x0 < midpoint for line in lines) < 3 or sum(line.x0 >= midpoint for line in lines) < 3:
@@ -132,11 +95,11 @@ def _independent_regions(lines: list[LayoutLine], gutter: float, page_height: fl
     if len(left) < 3 or len(right) < 3:
         return False
     coverage = max(line.y1 for line in right) - min(line.y0 for line in right)
-    if coverage < 0.16 * page_height:
+    if coverage < THRESHOLDS.secondary_coverage_ratio * page_height:
         return False
     row_groups = _rows(lines)
     paired = sum(any(line.x0 < gutter for line in row) and any(line.x0 >= gutter for line in row) for row in row_groups)
-    return 1 - paired / max(1, len(row_groups)) >= 0.45 or len(right) / max(1, len(lines)) > 0.25
+    return 1 - paired / max(1, len(row_groups)) >= THRESHOLDS.unpaired_row_ratio or len(right) / max(1, len(lines)) > 0.25
 
 
 def _coverage_ok(original: list[LayoutLine], ordered: list[LayoutLine]) -> bool:
@@ -151,7 +114,7 @@ def order_lines(lines: list[LayoutLine], page_width: float, page_height: float) 
     if not lines:
         return [], False
     paired = _pair_bullets(lines, page_width)
-    full_width = [line for line in paired if line.width >= 0.68 * page_width]
+    full_width = [line for line in paired if line.width >= THRESHOLDS.full_width_ratio * page_width]
     gutter = _gutter([line for line in paired if line not in full_width], page_width)
     if gutter is None or not _independent_regions(paired, gutter, page_height):
         ordered = [line for row in _rows(paired) for line in row]
@@ -159,7 +122,7 @@ def order_lines(lines: list[LayoutLine], page_width: float, page_height: float) 
         ordered = []
         segment: list[LayoutLine] = []
         for row in _rows(paired):
-            band = [line for line in row if line.width >= 0.68 * page_width]
+            band = [line for line in row if line.width >= THRESHOLDS.full_width_ratio * page_width]
             if band:
                 ordered.extend(_region_order(segment, gutter))
                 segment = []
