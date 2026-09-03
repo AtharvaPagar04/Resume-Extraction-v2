@@ -42,7 +42,7 @@ def _gutter(lines: list[LayoutLine], page_width: float) -> float | None:
 
 
 def _pair_bullets(lines: list[LayoutLine], page_width: float) -> list[LayoutLine]:
-    ordered = _basic(lines)
+    ordered = list(lines)
     if not ordered:
         return []
     med = median(line.height for line in ordered) if ordered else 1.0
@@ -74,7 +74,7 @@ def _pair_bullets(lines: list[LayoutLine], page_width: float) -> list[LayoutLine
                 and not starts_with_bullet(candidate.text)
                 and (gutter is None or (line.x0 < gutter) == (candidate.x0 < gutter))
                 and 0 <= candidate.x0 - line.x1 <= THRESHOLDS.bullet_right_gap_ratio * page_width
-                and 0 <= candidate.y0 - line.y0 <= THRESHOLDS.continuation_vertical_gap_ratio * med
+                and (_same_row(line, candidate, med) or 0 <= candidate.y0 - line.y0 <= THRESHOLDS.continuation_vertical_gap_ratio * med)
                 and candidate.width > 0
             ]
             if not choices:
@@ -180,17 +180,39 @@ def _pair_bullets(lines: list[LayoutLine], page_width: float) -> list[LayoutLine
     return paired
 
 
-def _independent_regions(lines: list[LayoutLine], gutter: float, page_height: float) -> bool:
+def _independent_regions(
+    lines: list[LayoutLine],
+    gutter: float,
+    page_height: float,
+    page_width: float,
+) -> bool:
     left = [line for line in lines if line.x0 < gutter]
     right = [line for line in lines if line.x0 >= gutter]
-    if len(left) < 3 or len(right) < 3:
+    if len(left) < THRESHOLDS.gutter_side_support or len(right) < THRESHOLDS.gutter_side_support:
         return False
     coverage = max(line.y1 for line in right) - min(line.y0 for line in right)
     if coverage < THRESHOLDS.secondary_coverage_ratio * page_height:
         return False
+    right_share = len(right) / max(1, len(lines))
+    if right_share <= 0.25:
+        return False
     row_groups = _rows(lines)
-    paired = sum(any(line.x0 < gutter for line in row) and any(line.x0 >= gutter for line in row) for row in row_groups)
-    return 1 - paired / max(1, len(row_groups)) >= THRESHOLDS.unpaired_row_ratio or len(right) / max(1, len(lines)) > 0.25
+    topology_rows = [
+        row
+        for row in row_groups
+        if not any(line.width >= THRESHOLDS.full_width_ratio * page_width for line in row)
+    ]
+    n_r = sum(
+        1
+        for row in topology_rows
+        if any(line.x0 >= gutter for line in row) and not any(line.x0 < gutter for line in row)
+    )
+    n_l = sum(
+        1
+        for row in topology_rows
+        if any(line.x0 < gutter for line in row) and not any(line.x0 >= gutter for line in row)
+    )
+    return n_r > 0 or n_l == 0
 
 
 def _coverage_ok(original: list[LayoutLine], ordered: list[LayoutLine]) -> bool:
@@ -199,15 +221,51 @@ def _coverage_ok(original: list[LayoutLine], ordered: list[LayoutLine]) -> bool:
     return len(source) == len(emitted) and sorted(source) == sorted(emitted) and len(emitted) == len(set(emitted))
 
 
+def _normalize_region_segment(lines: list[LayoutLine], gutter: float) -> list[LayoutLine]:
+    left = [line for line in lines if line.x0 < gutter]
+    right = [line for line in lines if line.x0 >= gutter]
+    if not left or not right:
+        return [line for row in _rows(lines) for line in row]
+    left_width = max(line.x1 for line in left) - min(line.x0 for line in left)
+    right_width = max(line.x1 for line in right) - min(line.x0 for line in right)
+    left_ordered = [line for row in _rows(left) for line in row]
+    right_ordered = [line for row in _rows(right) for line in row]
+    return left_ordered + right_ordered if left_width >= right_width else right_ordered + left_ordered
+
+
+def _pre_pair_normalize(lines: list[LayoutLine], page_width: float, page_height: float) -> list[LayoutLine]:
+    if not lines:
+        return []
+    full_width = [line for line in lines if line.width >= THRESHOLDS.full_width_ratio * page_width]
+    gutter_lines = [line for line in lines if line not in full_width]
+    gutter = _gutter(gutter_lines, page_width)
+    if gutter is None or not _independent_regions(lines, gutter, page_height, page_width):
+        return [line for row in _rows(lines) for line in row]
+    ordered: list[LayoutLine] = []
+    segment: list[LayoutLine] = []
+    for row in _rows(lines):
+        band = [line for line in row if line.width >= THRESHOLDS.full_width_ratio * page_width]
+        if band:
+            ordered.extend(_normalize_region_segment(segment, gutter))
+            segment = []
+            ordered.extend(sorted(row, key=lambda line: (line.x0, line.block_index, line.line_index)))
+        else:
+            segment.extend(row)
+    ordered.extend(_normalize_region_segment(segment, gutter))
+    return ordered
+
+
 def order_lines(lines: list[LayoutLine], page_width: float, page_height: float) -> tuple[list[LayoutLine], bool]:
     """Return normalized reading order and whether source-safe fallback was used."""
     basic = _basic(lines)
     if not lines:
         return [], False
-    paired = _pair_bullets(lines, page_width)
+    normalized = _pre_pair_normalize(lines, page_width, page_height)
+    paired = _pair_bullets(normalized, page_width)
     full_width = [line for line in paired if line.width >= THRESHOLDS.full_width_ratio * page_width]
-    gutter = _gutter([line for line in paired if line not in full_width], page_width)
-    if gutter is None or not _independent_regions(paired, gutter, page_height):
+    gutter_lines = [line for line in paired if line not in full_width]
+    gutter = _gutter(gutter_lines, page_width)
+    if gutter is None or not _independent_regions(paired, gutter, page_height, page_width):
         ordered = [line for row in _rows(paired) for line in row]
     else:
         ordered = []
@@ -218,6 +276,9 @@ def order_lines(lines: list[LayoutLine], page_width: float, page_height: float) 
                 ordered.extend(_region_order(segment, gutter))
                 segment = []
                 ordered.extend(_basic(band))
+                remainder = [line for line in row if line not in band]
+                if remainder:
+                    ordered.extend(_basic(remainder))
             else:
                 segment.extend(row)
         ordered.extend(_region_order(segment, gutter))
