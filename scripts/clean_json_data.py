@@ -67,8 +67,8 @@ def normalize_phone_number(phone: str) -> str:
     return phone
 
 
-def split_into_sections(text: str) -> dict[str, str]:
-    """Deterministically segment text into standard resume sections."""
+def split_into_sections(text: str) -> dict[str, list[str]]:
+    """Deterministically segment text into standard resume sections with list-of-lines formatting."""
     lines = text.split("\n")
     sections: dict[str, list[str]] = {"header": []}
     current_section = "header"
@@ -89,12 +89,12 @@ def split_into_sections(text: str) -> dict[str, str]:
         else:
             sections[current_section].append(line)
 
-    # Format each section
-    result: dict[str, str] = {}
+    # Format each section as an array of line strings
+    result: dict[str, list[str]] = {}
     for sec_name, sec_lines in sections.items():
-        content = "\n".join(sec_lines).strip()
-        if content:
-            result[sec_name] = content
+        formatted_lines = [line.strip() for line in sec_lines if line.strip()]
+        if formatted_lines:
+            result[sec_name] = formatted_lines
     return result
 
 
@@ -102,12 +102,18 @@ def clean_single_resume_dict(raw_data: dict[str, Any]) -> dict[str, Any]:
     """Clean a single raw resume dictionary."""
     raw_text = raw_data.get("text", "")
 
-    # Clean pages separated by \f
+    # Clean pages separated by \f into arrays of line strings
     raw_pages = raw_text.split("\f") if "\f" in raw_text else [raw_text]
-    cleaned_pages = [clean_text_content(page) for page in raw_pages if page.strip()]
+    cleaned_pages = [
+        [line.strip() for line in clean_text_content(page).split("\n") if line.strip()]
+        for page in raw_pages
+        if page.strip()
+    ]
+    cleaned_pages = [page for page in cleaned_pages if page]
 
-    # Clean full unified text (replace form feeds with double newlines)
+    # Clean full unified text into an array of line strings
     cleaned_full_text = clean_text_content(raw_text.replace("\f", "\n\n"))
+    cleaned_text_lines = [line.strip() for line in cleaned_full_text.split("\n") if line.strip()]
 
     # Extract & detect sections
     sections = split_into_sections(cleaned_full_text)
@@ -138,7 +144,7 @@ def clean_single_resume_dict(raw_data: dict[str, Any]) -> dict[str, Any]:
         },
         "pages": cleaned_pages,
         "sections": sections,
-        "cleaned_text": cleaned_full_text,
+        "cleaned_text": cleaned_text_lines,
         "hyperlinks": raw_data.get("hyperlinks", []),
         "schema_version": "4.0.0-cleaned",
     }

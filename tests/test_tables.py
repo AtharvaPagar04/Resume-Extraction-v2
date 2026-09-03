@@ -4,8 +4,8 @@ from types import SimpleNamespace
 import pymupdf as fitz
 
 from resume_extractor.extractor import extract_pdf
-from resume_extractor.layout_foundation import GutterCandidate, LayoutLine, LogicalRow, TableCandidate, build_page_layout
-from resume_extractor.tables import TableCell, TableRow, _aligned_candidates, _is_cross_region_bridge, _is_layout_artifact, _logical_columns, _logical_rows, _reconstruct_visual_rows, _rule_separates, _serialize, reconstruct_tables
+from resume_extractor.layout_foundation import GutterCandidate, LayoutLine, LogicalRow, Span, TableCandidate, build_page_layout
+from resume_extractor.tables import TableCell, TableRow, _aligned_candidates, _header_row, _is_cross_region_bridge, _is_layout_artifact, _logical_columns, _logical_rows, _reconstruct_visual_rows, _rule_separates, _serialize, reconstruct_tables
 
 
 def table_pdf(tmp_path, rows, widths=(140, 140), header_bold=True, bold_rows=None, name="table.pdf", before=(), after=(), link=None, ruled=True):
@@ -70,6 +70,18 @@ def grid_cell(row, column, bbox, text=""):
     return TableCell(row, column, bbox, text=text)
 
 
+def styled_cell(row, column, text, bold=False, fragments=1, size=10):
+    spans = tuple(
+        Span(text, text, (column * 100, row * 20, column * 100 + 50, row * 20 + 10), "", size, 0, bold, False, 0.0, row, column, index, (row, column, index))
+        for index in range(fragments)
+    )
+    return TableCell(row, column, (column * 100, row * 20, column * 100 + 50, row * 20 + 10), spans, text=text)
+
+
+def styled_row(row, styles):
+    return tuple(styled_cell(row, column, f"cell-{row}-{column}", bold, fragments) for column, (bold, fragments) in enumerate(styles))
+
+
 def source_line(block, index, bbox):
     return LayoutLine("", "", bbox, block, index, (block, index), ())
 
@@ -125,6 +137,40 @@ def test_empty_header_cell_preserves_its_body_value_without_empty_separator(tmp_
 def test_headerless_logical_rows_omit_empty_active_values(tmp_path):
     result = table_result(table_pdf(tmp_path, (("one", "", "three"), ("four", "five", "six")), (120, 120, 120), header_bold=False))
     assert result.tables[0].text == "one | three\nfour | five | six"
+
+
+def test_header_role_is_invariant_to_wrapped_bold_label_fragments():
+    body = (styled_row(1, ((True, 1), (False, 1))), styled_row(2, ((True, 1), (False, 1))))
+    unwrapped = styled_row(0, ((True, 1), (False, 1)))
+    wrapped = styled_row(0, ((True, 3), (False, 1)))
+    assert not _header_row(unwrapped, body)
+    assert _header_row(unwrapped, body) == _header_row(wrapped, body)
+    rows = (TableRow(0, wrapped, (0, 0, 200, 10)), TableRow(1, body[0], (0, 20, 200, 30)), TableRow(2, body[1], (0, 40, 200, 50)))
+    assert _serialize(rows).splitlines()[0] == "cell-0-0: cell-0-1"
+
+
+def test_header_role_is_unchanged_when_a_later_label_wraps():
+    first = styled_row(0, ((True, 1), (False, 1)))
+    body = (styled_row(1, ((True, 3), (False, 1))), styled_row(2, ((True, 1), (False, 1))))
+    assert not _header_row(first, body)
+
+
+def test_true_headers_use_cell_normalized_style_not_fragment_count():
+    header = styled_row(0, ((True, 3), (True, 1), (True, 1), (True, 1)))
+    body = (styled_row(1, ((False, 1),) * 4), styled_row(2, ((False, 1),) * 4))
+    assert _header_row(header, body)
+
+
+def test_partial_header_emphasis_and_incidental_body_bold_are_preserved():
+    header = styled_row(0, ((True, 1), (True, 1), (False, 1)))
+    body = (styled_row(1, ((True, 1), (False, 1), (False, 1))), styled_row(2, ((False, 1), (False, 1), (False, 1))))
+    assert _header_row(header, body)
+
+
+def test_multicolumn_repeated_body_style_is_not_a_header():
+    first = styled_row(0, ((True, 1), (False, 1), (True, 1)))
+    body = (styled_row(1, ((True, 1), (False, 1), (True, 1))), styled_row(2, ((True, 1), (False, 1), (True, 1))))
+    assert not _header_row(first, body)
 
 
 def test_sparse_native_grid_is_not_accepted_as_a_table(tmp_path):

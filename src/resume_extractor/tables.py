@@ -289,15 +289,41 @@ def _header_row(cells: tuple[TableCell, ...], body_rows: tuple[tuple[TableCell, 
     if not cells or not any(cell.text for cell in cells):
         return False
     first_style = _style_weight(cells)
-    body_style = median([_style_weight(row) for row in body_rows if any(cell.text for cell in row)] or [first_style])
+    populated = tuple(row for row in body_rows if any(cell.text for cell in row))
+    body_style = median([_style_weight(row) for row in populated] or [first_style])
+    if populated and _style_signature(cells) == _body_style_signature(populated):
+        return False
     return first_style > body_style + 0.1
 
 
 def _style_weight(cells: Iterable[TableCell]) -> float:
-    spans = [span for cell in cells for span in cell.source_spans]
-    if not spans:
+    cell_weights = [_cell_style(cell)[0] for cell in cells if cell.text]
+    if not cell_weights:
         return 0.0
-    return sum((1.0 if span.bold else 0.0) + span.font_size / 1000 for span in spans) / len(spans)
+    return sum(cell_weights) / len(cell_weights)
+
+
+def _cell_style(cell: TableCell) -> tuple[float, bool]:
+    """One logical-cell style vote, independent of physical span multiplicity."""
+    spans = cell.source_spans
+    if not spans:
+        return 0.0, False
+    bold_ratio = sum(span.bold for span in spans) / len(spans)
+    return bold_ratio + median(span.font_size for span in spans) / 1000, bold_ratio >= 0.5
+
+
+def _style_signature(cells: Iterable[TableCell]) -> tuple[bool | None, ...]:
+    return tuple(_cell_style(cell)[1] if cell.text else None for cell in cells)
+
+
+def _body_style_signature(rows: Iterable[tuple[TableCell, ...]]) -> tuple[bool | None, ...]:
+    rows = tuple(rows)
+    width = max((len(row) for row in rows), default=0)
+    signature: list[bool | None] = []
+    for index in range(width):
+        values = [_cell_style(row[index])[1] for row in rows if index < len(row) and row[index].text]
+        signature.append(sum(values) * 2 >= len(values) if values else None)
+    return tuple(signature)
 
 
 def _trim_boundary_empty_rows(rows: list[TableRow]) -> list[TableRow]:

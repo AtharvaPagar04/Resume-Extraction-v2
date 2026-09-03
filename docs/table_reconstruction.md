@@ -29,7 +29,7 @@ Span ownership priority is containment, unique strongest intersection, then uniq
 
 Native table rows are evidence rather than final visual rows. Before density validation, text-bearing logical cells with overlapping vertical bands are reconciled into one visual row. Same-column continuations require a tight vertical gap, shared source block, and either a neighboring cell spanning both fragments or a matching continuation in another logical column; a structural horizontal rule blocks the merge. This permits wrapped labels and values to remain paired without collapsing independently flowing columns.
 
-The first row is a header only when generic presentation evidence is stronger than body rows. With a header, output is `Header: value | Header: value`; without one, two columns become `label: value`, while wider rows retain positional ` | ` separators. Empty cells never shift other columns.
+The first row is a header only when generic presentation evidence is stronger than body rows. Style evidence is normalized per logical cell before rows are compared, so a wrapped bold cell has one vote rather than one vote per physical span. A first-row bold/plain pattern repeated by body rows is treated as ordinary row role, not a header. With a header, output is `Header: value | Header: value`; without one, two columns become `label: value`, while wider rows retain positional ` | ` separators. Empty cells never shift other columns.
 
 ## Consumption and safety
 
