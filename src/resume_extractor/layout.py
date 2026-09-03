@@ -4,7 +4,7 @@ from dataclasses import replace
 from statistics import median
 
 from .geometry import THRESHOLDS, same_row
-from .layout_foundation import LayoutLine, is_bullet_only
+from .layout_foundation import LayoutLine, is_bullet_only, starts_with_bullet
 
 
 def _basic(lines: list[LayoutLine]) -> list[LayoutLine]:
@@ -28,54 +28,6 @@ def _rows(lines: list[LayoutLine]) -> list[list[LayoutLine]]:
     return [sorted(row, key=lambda line: (line.x0, line.block_index, line.line_index)) for row in groups]
 
 
-def _pair_bullets(lines: list[LayoutLine], page_width: float) -> list[LayoutLine]:
-    ordered = _basic(lines)
-    med = median(line.height for line in ordered) if ordered else 1.0
-    consumed: set[int] = set()
-    paired: list[LayoutLine] = []
-    for index, line in enumerate(ordered):
-        if index in consumed:
-            continue
-        if not is_bullet_only(line.text):
-            paired.append(line)
-            continue
-        choices = [
-            (candidate.x0 - line.x1, candidate_index, candidate)
-            for candidate_index, candidate in enumerate(ordered[index + 1 :], index + 1)
-            if candidate_index not in consumed
-            and 0 <= candidate.x0 - line.x1 <= THRESHOLDS.bullet_right_gap_ratio * page_width
-            and 0 <= candidate.y0 - line.y0 <= THRESHOLDS.continuation_vertical_gap_ratio * med
-            and candidate.width > 0
-        ]
-        if not choices:
-            paired.append(line)
-            continue
-        _, candidate_index, candidate = min(choices)
-        continuation = [candidate]
-        last = candidate
-        for following_index, following in enumerate(ordered[candidate_index + 1 :], candidate_index + 1):
-            if following_index in consumed or len(continuation) >= 5:
-                continue
-            if following.block_index != candidate.block_index or following.style != candidate.style:
-                continue
-            if following.width >= THRESHOLDS.full_width_ratio * page_width or following.y0 < last.y0 or following.y0 - last.y1 > THRESHOLDS.continuation_vertical_gap_ratio * med:
-                continue
-            if abs(following.x0 - candidate.x0) > THRESHOLDS.continuation_indent_ratio * page_width or following.x0 < last.x0 - THRESHOLDS.continuation_backtrack_ratio * page_width:
-                continue
-            continuation.append(following)
-            consumed.add(following_index)
-            last = following
-        merged = replace(
-            line,
-            reconstructed_text=f"{line.text.strip()} " + " ".join(item.text for item in continuation),
-            bbox=(line.x0, min(line.y0, candidate.y0), max(item.x1 for item in continuation), max(line.y1, last.y1)),
-            source_ids=line.source_ids + tuple(source_id for item in continuation for source_id in item.source_ids),
-        )
-        paired.append(merged)
-        consumed.add(candidate_index)
-    return paired
-
-
 def _gutter(lines: list[LayoutLine], page_width: float) -> float | None:
     starts = sorted(line.x0 for line in lines)
     if len(starts) < 6:
@@ -87,6 +39,145 @@ def _gutter(lines: list[LayoutLine], page_width: float) -> float | None:
     if sum(line.x0 < midpoint for line in lines) < 3 or sum(line.x0 >= midpoint for line in lines) < 3:
         return None
     return midpoint
+
+
+def _pair_bullets(lines: list[LayoutLine], page_width: float) -> list[LayoutLine]:
+    ordered = _basic(lines)
+    if not ordered:
+        return []
+    med = median(line.height for line in ordered) if ordered else 1.0
+    consumed: set[int] = set()
+    paired: list[LayoutLine] = []
+
+    full_width = [line for line in ordered if line.width >= THRESHOLDS.full_width_ratio * page_width]
+    gutter = _gutter([line for line in ordered if line not in full_width], page_width)
+
+    for index, line in enumerate(ordered):
+        if index in consumed:
+            continue
+
+        is_detached = is_bullet_only(line.text)
+        is_inline = starts_with_bullet(line.text) and not is_detached
+
+        if not is_detached and not is_inline:
+            paired.append(line)
+            continue
+
+        marker_x0 = line.x0
+
+        if is_detached:
+            choices = [
+                (candidate.x0 - line.x1, candidate_index, candidate)
+                for candidate_index, candidate in enumerate(ordered[index + 1 :], index + 1)
+                if candidate_index not in consumed
+                and not is_bullet_only(candidate.text)
+                and not starts_with_bullet(candidate.text)
+                and (gutter is None or (line.x0 < gutter) == (candidate.x0 < gutter))
+                and 0 <= candidate.x0 - line.x1 <= THRESHOLDS.bullet_right_gap_ratio * page_width
+                and 0 <= candidate.y0 - line.y0 <= THRESHOLDS.continuation_vertical_gap_ratio * med
+                and candidate.width > 0
+            ]
+            if not choices:
+                paired.append(line)
+                continue
+            _, candidate_index, candidate = min(choices)
+            continuation = [candidate]
+            consumed.add(candidate_index)
+            content_x0 = candidate.x0
+            last = candidate
+            start_search = candidate_index + 1
+        else:
+            continuation = []
+            content_x0 = line.x0
+            last = line
+            start_search = index + 1
+
+        for following_index in range(start_search, len(ordered)):
+            if following_index in consumed or len(continuation) >= 10:
+                continue
+            following = ordered[following_index]
+
+            # 1. Stop immediately at next bullet boundary
+            if is_bullet_only(following.text) or starts_with_bullet(following.text):
+                break
+
+            # 2. Gutter / column boundary safety
+            if gutter is not None and (line.x0 < gutter) != (following.x0 < gutter):
+                break
+
+            # 3. Vertical continuity check
+            if following.y0 < last.y0:
+                break
+            v_gap = following.y0 - last.y1
+            if v_gap > THRESHOLDS.continuation_vertical_gap_ratio * med:
+                break
+
+            # 4. Horizontal alignment / indent check
+            indent_delta = following.x0 - content_x0
+            backtrack_limit = THRESHOLDS.continuation_backtrack_ratio * page_width
+            max_indent = THRESHOLDS.continuation_indent_ratio * page_width
+
+            if indent_delta < -backtrack_limit or indent_delta > max_indent:
+                break
+
+            # 5. Heading / font size jump check
+            if following.dominant_font_size > last.dominant_font_size + 1.5:
+                break
+
+            # 6. Standalone subheading guard: colon or non-colon with style transition and list-run restart
+            # Colon labels: bold category prefix ending with colon (e.g. "Business Skills:")
+            is_colon_label = (
+                following.ends_with_colon
+                and following.bold_ratio >= THRESHOLDS.colon_label_min_bold_ratio
+                and following.bold_ratio > last.bold_ratio + THRESHOLDS.colon_label_min_bold_step
+            )
+            # Non-colon labels: bold standalone project/section title starting a block (e.g. "Snacc Item Rating")
+            is_non_colon_label = (
+                not following.ends_with_colon
+                and following.bold_ratio >= THRESHOLDS.heading_label_min_bold_ratio
+                and following.bold_ratio > last.bold_ratio + THRESHOLDS.heading_label_min_bold_step
+                and (following.line_index == 0 or following.block_index != last.block_index)
+            )
+            if is_colon_label or is_non_colon_label:
+                has_next_bullet = False
+                for lookahead_idx in range(
+                    following_index + 1,
+                    min(following_index + THRESHOLDS.subheading_lookahead_span, len(ordered)),
+                ):
+                    lookahead_line = ordered[lookahead_idx]
+                    if is_bullet_only(lookahead_line.text) or starts_with_bullet(lookahead_line.text):
+                        if abs(lookahead_line.x0 - marker_x0) <= THRESHOLDS.anchor_tolerance_ratio * page_width:
+                            has_next_bullet = True
+                        break
+                    if lookahead_line.y0 - following.y1 > THRESHOLDS.continuation_vertical_gap_ratio * med:
+                        break
+                if has_next_bullet:
+                    break
+
+            continuation.append(following)
+            consumed.add(following_index)
+            last = following
+
+        if not continuation and is_inline:
+            paired.append(line)
+        elif is_detached:
+            merged = replace(
+                line,
+                reconstructed_text=f"{line.text.strip()} " + " ".join(item.text for item in continuation),
+                bbox=(line.x0, min(line.y0, continuation[0].y0), max(item.x1 for item in continuation), max(line.y1, last.y1)),
+                source_ids=line.source_ids + tuple(source_id for item in continuation for source_id in item.source_ids),
+            )
+            paired.append(merged)
+        else:
+            merged = replace(
+                line,
+                reconstructed_text=f"{line.text.strip()} " + " ".join(item.text for item in continuation),
+                bbox=(line.x0, min(line.y0, line.y0), max(item.x1 for item in [line] + continuation), max(line.y1, last.y1)),
+                source_ids=line.source_ids + tuple(source_id for item in continuation for source_id in item.source_ids),
+            )
+            paired.append(merged)
+
+    return paired
 
 
 def _independent_regions(lines: list[LayoutLine], gutter: float, page_height: float) -> bool:

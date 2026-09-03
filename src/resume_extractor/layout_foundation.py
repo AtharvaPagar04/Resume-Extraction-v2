@@ -22,7 +22,7 @@ from .geometry import BBox, THRESHOLDS, bbox_height, bbox_width, center_x, cente
 from .reconstruction import normalize_text, reconstruct_line_from_spans
 
 
-_BULLET_MARKERS = frozenset({"•", "●", "▪", "▫", "◦", "‣", "∙", "-", "–", "—", "*"})
+_BULLET_MARKERS = frozenset({"•", "●", "▪", "▫", "◦", "‣", "∙", "-", "–", "—", "*", "∗"})
 _BOLD_NAMES = ("bold", "semibold", "semi-bold", "demi", "black", "heavy")
 _ITALIC_NAMES = ("italic", "oblique", "slanted")
 

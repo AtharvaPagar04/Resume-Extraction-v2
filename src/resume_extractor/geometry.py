@@ -47,6 +47,11 @@ class LayoutThresholds:
     table_column_overlap_ratio: float = 0.80  # smaller visual column width shared before raw columns coalesce
     table_row_continuation_gap_ratio: float = 0.20  # continuation gap / median table text-cell height
     aligned_band_min_row_support: int = 2  # distinct core rows before an aligned x-band is structural
+    subheading_lookahead_span: int = 4  # max lines to look ahead for bullet restart at active marker anchor
+    colon_label_min_bold_ratio: float = 0.70  # minimum bold ratio to recognize colon-terminated subheadings
+    colon_label_min_bold_step: float = 0.30  # minimum bold transition over preceding body text for colon subheadings
+    heading_label_min_bold_ratio: float = 0.80  # minimum bold ratio to recognize non-colon standalone headings
+    heading_label_min_bold_step: float = 0.40  # minimum upward bold transition from preceding body text for non-colon headings
 
 
 THRESHOLDS = LayoutThresholds()

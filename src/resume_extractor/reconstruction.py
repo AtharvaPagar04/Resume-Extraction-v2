@@ -17,8 +17,8 @@ class SpanFragment:
 
 
 def normalize_text(text: str) -> str:
-    """Normalize renderer-only whitespace without changing words or punctuation."""
-    text = text.replace("\u00a0", " ")
+    """Normalize renderer-only whitespace and legacy Symbol-font bullets without changing words or punctuation."""
+    text = text.replace("\u00a0", " ").replace("\uf0b7", "•")
     text = _CID_ARTIFACT.sub("", text)
     return re.sub(r"\s+", " ", text).strip()
 
@@ -41,7 +41,7 @@ def reconstruct_line_from_spans(spans: list[dict[str, Any]]) -> str:
     previous: SpanFragment | None = None
     pending_whitespace = False
     for fragment in fragments:
-        source = _CID_ARTIFACT.sub("", fragment.text).replace("\u00a0", " ")
+        source = _CID_ARTIFACT.sub("", fragment.text).replace("\u00a0", " ").replace("\uf0b7", "•")
         if not source:
             continue
         if source.isspace():

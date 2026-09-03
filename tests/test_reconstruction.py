@@ -31,3 +31,28 @@ def test_removes_cid_artifact_without_word_segmentation():
 
 def test_unicode_is_preserved():
     assert normalize_text("  Résumé\u00a0—  東京  ") == "Résumé — 東京"
+
+
+def test_normalizes_legacy_symbol_font_bullet():
+    from resume_extractor.layout_foundation import is_bullet_only, starts_with_bullet
+
+    # Standalone
+    standalone = normalize_text("\uf0b7")
+    assert standalone == "•"
+    assert reconstruct_line_from_spans([span("\uf0b7", 0, 10)]) == "•"
+    assert is_bullet_only(standalone)
+    assert starts_with_bullet(standalone)
+
+    # Inline
+    inline = normalize_text("\uf0b7 Delivered features")
+    assert inline == "• Delivered features"
+    assert reconstruct_line_from_spans([span("\uf0b7", 0, 10), span("Delivered features", 15, 100)]) == "• Delivered features"
+    assert starts_with_bullet(inline)
+    assert not is_bullet_only(inline)
+
+
+def test_existing_bullet_markers_and_punctuation_unchanged():
+    for marker in ["•", "●", "▪", "▫", "◦", "‣", "∙", "-", "–", "—", "*"]:
+        assert normalize_text(marker) == marker
+    for punct in ["|", "/", "@", "&", ":", "(", ")", "1.", "a)"]:
+        assert normalize_text(punct) == punct
