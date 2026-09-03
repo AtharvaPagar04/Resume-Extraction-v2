@@ -52,7 +52,56 @@ def test_normalizes_legacy_symbol_font_bullet():
 
 
 def test_existing_bullet_markers_and_punctuation_unchanged():
-    for marker in ["•", "●", "▪", "▫", "◦", "‣", "∙", "-", "–", "—", "*"]:
+    for marker in ["•", "●", "▪", "▫", "◦", "‣", "∙", "-", "–", "—", "*", "∗", "○"]:
         assert normalize_text(marker) == marker
     for punct in ["|", "/", "@", "&", ":", "(", ")", "1.", "a)"]:
         assert normalize_text(punct) == punct
+
+
+def test_u200b_standalone_marker_normalizes_correctly():
+    from resume_extractor.layout_foundation import is_bullet_only, starts_with_bullet
+
+    norm = normalize_text("●\u200b")
+    assert norm == "●"
+    assert reconstruct_line_from_spans([span("●\u200b", 0, 10)]) == "●"
+    assert is_bullet_only(norm)
+    assert starts_with_bullet(norm)
+
+
+def test_u200b_inline_marker_normalizes_correctly():
+    from resume_extractor.layout_foundation import is_bullet_only, starts_with_bullet
+
+    norm = normalize_text("●\u200b Designed API platform")
+    assert norm == "● Designed API platform"
+    assert reconstruct_line_from_spans([span("●\u200b", 0, 10), span("Designed API platform", 15, 120)]) == "● Designed API platform"
+    assert starts_with_bullet(norm)
+    assert not is_bullet_only(norm)
+
+
+def test_u200b_trailing_colon_restores_colon_termination():
+    norm = normalize_text("Description:\u200b")
+    assert norm == "Description:"
+    assert norm.endswith(":")
+
+
+def test_u200b_standalone_becomes_empty():
+    assert normalize_text("\u200b") == ""
+    assert reconstruct_line_from_spans([span("\u200b", 0, 10)]) == ""
+
+
+def test_u200b_ordinary_unicode_text_unchanged():
+    samples = [
+        "Engineering & Machine Learning — PyTorch, TensorFlow",
+        "Résumé of François Müller (Senior AI Engineer)",
+        "Contract value: $100k+ [99.9% uptime]",
+    ]
+    for sample in samples:
+        assert normalize_text(sample) == sample
+
+
+def test_unrelated_cf_characters_not_generically_removed():
+    # Only U+200B is removed; other Cf characters (e.g. LTR/RTL marks, ZWNJ, ZWJ) are untouched
+    assert "\u200e" in normalize_text("Text\u200eWithLTR")
+    assert "\u200f" in normalize_text("Text\u200fWithRTL")
+    assert "\u200c" in normalize_text("Text\u200cWithZWNJ")
+    assert "\u200d" in normalize_text("Text\u200dWithZWJ")

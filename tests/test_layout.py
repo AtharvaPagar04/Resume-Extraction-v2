@@ -337,3 +337,35 @@ def test_new_block_without_strong_style_transition_not_split():
     ]
 
 
+def test_u25cb_standalone_is_recognized_as_bullet_only():
+    from resume_extractor.layout_foundation import is_bullet_only, starts_with_bullet
+
+    assert is_bullet_only("○")
+    assert starts_with_bullet("○")
+
+
+def test_u25cb_inline_starts_with_bullet():
+    from resume_extractor.layout_foundation import is_bullet_only, starts_with_bullet
+
+    assert starts_with_bullet("○ Software Engineer at Tech Company")
+    assert not is_bullet_only("○ Software Engineer at Tech Company")
+
+
+def test_detached_u25cb_pairs_with_adjacent_content_using_existing_logic():
+    source = [
+        line("○", 90, 10, 96, 20, 0),
+        line("Web Dream Works India Pvt Ltd — Software Engineer", 108, 10, 375, 20, 1),
+        line("○", 90, 25, 96, 35, 2),
+        line("Techiche Pvt Ltd — Senior Software Engineer", 108, 25, 350, 35, 3),
+        line("○", 90, 40, 96, 50, 4),
+        line("Toprock India Pvt Ltd — Senior Software Engineer", 108, 40, 360, 50, 5),
+    ]
+    ordered, _ = order_lines(source, 400, 300)
+    assert texts(ordered) == [
+        "○ Web Dream Works India Pvt Ltd — Software Engineer",
+        "○ Techiche Pvt Ltd — Senior Software Engineer",
+        "○ Toprock India Pvt Ltd — Senior Software Engineer",
+    ]
+
+
+
