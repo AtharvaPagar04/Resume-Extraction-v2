@@ -58,7 +58,13 @@ def _normalize_email(value: str) -> str:
 
 
 def reconstruct_broken_urls(text: str) -> str:
-    return re.sub(r"(?i)((?:https?://|www\.)[^\s\n]+)\s*\n\s*([^\s]+)", r"\1\2", text)
+    """Narrowed compatibility stub.
+
+    Arbitrary cross-line URL reconstruction from raw text is unsafe and has been
+    superseded by source-aware derived URL candidate extraction in Phase 1A.
+    Returns text unchanged.
+    """
+    return text
 
 
 def _phone_numbers(text: str) -> list[str]:
@@ -79,15 +85,48 @@ def _phone_numbers(text: str) -> list[str]:
     return _unique(results)
 
 
-def extract_fields(text: str, annotation_uris: Iterable[str] = ()) -> ExtractedFields:
-    stitched = reconstruct_broken_urls(text.replace("\f", "\n"))
-    emails = _unique(_normalize_email(match.group(0)) for match in _EMAIL.finditer(stitched))
-    candidates = [match.group(0) for match in _URL.finditer(stitched)] + list(annotation_uris)
-    urls = _unique(url for candidate in candidates if (url := normalize_url(candidate)) and not url.startswith("mailto:"))
+def extract_fields(
+    text: str,
+    annotation_uris: Iterable[str] = (),
+    derived_url_candidates: Iterable[object] = (),
+    suppressed_url_occurrences: Iterable[tuple[int, int]] = (),
+    consumed_prefixes: Iterable[str] = (),
+) -> ExtractedFields:
+    # Exact suppression set based strictly on canonical-text document occurrence ranges [start, end)
+    suppressed_ranges: set[tuple[int, int]] = set(suppressed_url_occurrences)
+    derived_urls: list[str] = []
+    for cand in derived_url_candidates:
+        if hasattr(cand, "value"):
+            derived_urls.append(cand.value)
+        else:
+            derived_urls.append(str(cand))
+        if hasattr(cand, "prefix_document_start") and hasattr(cand, "prefix_document_end"):
+            if cand.prefix_document_end > cand.prefix_document_start >= 0:
+                suppressed_ranges.add((cand.prefix_document_start, cand.prefix_document_end))
+
+    # Authoritative text URL discovery: match on authoritative text, suppressing exact ranges only
+    raw_text_urls: list[str] = []
+    for match in _URL.finditer(text):
+        occurrence = (match.start(), match.end())
+        if occurrence in suppressed_ranges:
+            continue
+        raw_text_urls.append(match.group(0))
+
+    raw_candidates = [*raw_text_urls, *annotation_uris, *derived_urls]
+    urls: list[str] = []
+    for candidate in raw_candidates:
+        url = normalize_url(candidate)
+        if url and not url.startswith("mailto:"):
+            urls.append(url)
+    urls = _unique(urls)
+
+    clean_text = text.replace("\f", "\n")
+    emails = _unique(_normalize_email(match.group(0)) for match in _EMAIL.finditer(clean_text))
     for uri in annotation_uris:
         if uri.lower().startswith("mailto:") and (email := uri[7:]) and _EMAIL.fullmatch(email):
             emails = _unique([*emails, _normalize_email(email)])
     linkedin = [url for url in urls if urlsplit(url).hostname and (urlsplit(url).hostname == "linkedin.com" or urlsplit(url).hostname.endswith(".linkedin.com"))]
     github = [url for url in urls if urlsplit(url).hostname and (urlsplit(url).hostname == "github.com" or urlsplit(url).hostname.endswith(".github.com"))]
     special = {url.casefold() for url in [*linkedin, *github]}
-    return ExtractedFields(emails, _phone_numbers(stitched), linkedin, github, [url for url in urls if url.casefold() not in special])
+    return ExtractedFields(emails, _phone_numbers(clean_text), linkedin, github, [url for url in urls if url.casefold() not in special])
+

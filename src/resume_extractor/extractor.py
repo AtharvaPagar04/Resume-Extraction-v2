@@ -11,6 +11,7 @@ from .models import ExtractionStatus, RawHyperlink, RawResume, RawSource
 from .primitives import extract_fields, normalize_url
 from .reconstruction import reconstruct_line_from_spans
 from .tables import ReconstructedTable, reconstruct_tables
+from .url_continuation import DerivedUrlCandidate, build_derived_url_candidates
 
 
 def split_pages(text: str) -> list[str]:
@@ -57,16 +58,16 @@ def _table_line(table: ReconstructedTable, table_index: int) -> LayoutLine:
     return LayoutLine(table.text, table.text, table.bbox, -1000 - table_index, 0, first.source_order, source_ids, table.source_spans, first.dominant_font_size, first.median_font_size, first.dominant_font_name, first.dominant_flags, is_table=True)
 
 
-def _page_lines(page: fitz.Page) -> tuple[list[LayoutLine], bool, tuple[str, ...]]:
+def _page_lines(page: fitz.Page) -> tuple[list[LayoutLine], bool, tuple[str, ...], PageLayout | None]:
     try:
         page_layout: PageLayout = build_page_layout(page, 1)
     except Exception:
-        return sorted(_basic_page_lines(page), key=lambda line: (line.y0, line.x0, line.block_index, line.line_index)), True, ()
+        return sorted(_basic_page_lines(page), key=lambda line: (line.y0, line.x0, line.block_index, line.line_index)), True, (), None
     reconstructed = reconstruct_tables(page_layout)
     lines = [line for line in page_layout.lines if line.source_order not in reconstructed.consumed_line_orders]
     lines.extend(_table_line(table, index) for index, table in enumerate(reconstructed.tables))
     ordered, fallback = order_lines(lines, page.rect.width, page.rect.height)
-    return ordered, fallback, tuple(dict.fromkeys([*page_layout.warnings, *reconstructed.warnings]))
+    return ordered, fallback, tuple(dict.fromkeys([*page_layout.warnings, *reconstructed.warnings])), page_layout
 
 
 def _links(page: fitz.Page, page_number: int, warnings: list[str]) -> list[RawHyperlink]:
@@ -106,24 +107,64 @@ def extract_pdf(path: str | Path) -> RawResume:
         pages: list[str] = []
         links: list[RawHyperlink] = []
         warnings: list[str] = []
+        page_lines_list: list[list[LayoutLine]] = []
+        page_layouts: list[PageLayout | None] = []
         for page_number in range(1, document.page_count + 1):
             try:
                 page = document[page_number - 1]
-                lines, fallback, page_warnings = _page_lines(page)
+                res = _page_lines(page)
+                lines = res[0]
+                fallback = res[1]
+                page_warnings = res[2]
+                page_layout = res[3] if len(res) > 3 else None
                 pages.append("\n".join(line.text for line in lines))
+                page_lines_list.append(lines)
+                page_layouts.append(page_layout)
                 if fallback and "READING_ORDER_FALLBACK" not in warnings:
                     warnings.append("READING_ORDER_FALLBACK")
                 warnings.extend(warning for warning in page_warnings if warning not in warnings)
                 links.extend(_links(page, page_number, warnings))
             except Exception:
                 pages.append("")
+                page_lines_list.append([])
+                page_layouts.append(None)
                 if "PARTIAL_PAGE_EXTRACTION" not in warnings:
                     warnings.append("PARTIAL_PAGE_EXTRACTION")
         text = "\f".join(pages)
         if not text.strip():
             warnings.append("NEEDS_OCR" if document.page_count else "NO_EXTRACTABLE_TEXT")
+
+        derived_candidates: list[DerivedUrlCandidate] = []
+        doc_page_start = 0
+        for p_idx, (p_text, lines, p_layout) in enumerate(zip(pages, page_lines_list, page_layouts)):
+            if p_layout is not None:
+                page_derived, _ = build_derived_url_candidates(
+                    lines,
+                    p_layout.hyperlinks,
+                    page_number=p_idx + 1,
+                    page_document_start=doc_page_start,
+                )
+                derived_candidates.extend(page_derived)
+            doc_page_start += len(p_text) + 1
+
+        suppressed_occurrences = {
+            (cand.prefix_document_start, cand.prefix_document_end)
+            for cand in derived_candidates
+            if cand.prefix_document_end > cand.prefix_document_start >= 0
+        }
         annotation_uris = [link.uri for link in links]
-        return RawResume(source, ExtractionStatus(True, warnings), text, links, extract_fields(text, annotation_uris))
+        return RawResume(
+            source,
+            ExtractionStatus(True, warnings),
+            text,
+            links,
+            extract_fields(
+                text,
+                annotation_uris,
+                derived_url_candidates=derived_candidates,
+                suppressed_url_occurrences=suppressed_occurrences,
+            ),
+        )
     except Exception as error:
         code = "ENCRYPTED_PDF" if "password" in str(error).lower() or "encrypt" in str(error).lower() else "CORRUPT_FILE"
         return RawResume(source, ExtractionStatus(False, [code]))

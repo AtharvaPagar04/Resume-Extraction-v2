@@ -13,8 +13,9 @@ def test_rejects_malformed_url():
     assert normalize_url("https://bad host.example") is None
 
 
-def test_reconstructs_url_shaped_broken_text_only():
-    assert reconstruct_broken_urls("https://example.com/a\nb?x=1") == "https://example.com/ab?x=1"
+def test_reconstructs_broken_urls_is_safe_stub():
+    # Phase 1A: Arbitrary cross-line URL stitching on raw text is unsafe and deactivated.
+    assert reconstruct_broken_urls("https://example.com/a\nb?x=1") == "https://example.com/a\nb?x=1"
 
 
 def test_extracts_and_normalizes_email():

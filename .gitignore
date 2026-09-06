@@ -3,6 +3,8 @@
 # =====================================================================
 output/
 graphify-out/
+audit_output/
+scratch/
 *.json.tmp
 *.tmp
 .*.tmp
@@ -16,6 +18,7 @@ dataset/
 datasets/
 data/
 *.pdf
+*.PDF
 
 # =====================================================================
 # Python & Bytecode

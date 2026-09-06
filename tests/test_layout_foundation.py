@@ -1,16 +1,21 @@
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
+from pathlib import Path
+import pytest
 
 import pymupdf as fitz
 
 import resume_extractor.extractor as extractor_module
 from resume_extractor.layout_foundation import (
+    CharacterEvidence,
     LayoutLine,
+    Span,
     _line_from_dict,
     build_page_layout,
     cluster_x_anchors,
     dump_layout_debug,
     find_gutter_candidates,
     group_rows,
+    span_text_from_source_chars,
     validate_line_accounting,
     validate_span_accounting,
 )
@@ -150,3 +155,119 @@ def test_foundation_failure_falls_back_to_basic_page_text(tmp_path, monkeypatch)
     monkeypatch.setattr(extractor_module, "build_page_layout", lambda *args: (_ for _ in ()).throw(RuntimeError("layout")))
     raw = extractor_module.extract_pdf(path)
     assert raw.text == "survives" and "READING_ORDER_FALLBACK" in raw.extraction.warnings
+
+
+def test_character_evidence_model_and_immutability():
+    char = CharacterEvidence(
+        text="A",
+        bbox=(10.0, 20.0, 18.0, 32.0),
+        origin=(10.0, 30.0),
+        synthetic=False,
+    )
+    assert char.text == "A"
+    assert char.bbox == (10.0, 20.0, 18.0, 32.0)
+    assert char.origin == (10.0, 30.0)
+    assert char.synthetic is False
+    with pytest.raises(FrozenInstanceError):
+        char.text = "B"  # type: ignore
+
+
+def test_span_text_surrogate_compatibility_projection():
+    chars = [
+        CharacterEvidence("H", (0, 0, 5, 10)),
+        CharacterEvidence("i", (5, 0, 8, 10)),
+    ]
+    assert span_text_from_source_chars(chars) == "Hi"
+
+    high_surrogate_char = CharacterEvidence("\ud83d", (10, 0, 20, 10))
+    assert high_surrogate_char.text == "\ud83d"
+    assert span_text_from_source_chars([high_surrogate_char]) == "\ufffd"
+
+    low_surrogate_char = CharacterEvidence("\udc00", (20, 0, 30, 10))
+    assert low_surrogate_char.text == "\udc00"
+    assert span_text_from_source_chars([low_surrogate_char]) == "\ufffd"
+
+    mixed = [
+        CharacterEvidence("A", (0, 0, 5, 10)),
+        CharacterEvidence("\ud800", (5, 0, 10, 10)),
+        CharacterEvidence("B", (10, 0, 15, 10)),
+    ]
+    assert span_text_from_source_chars(mixed) == "A\ufffdB"
+
+
+def test_rawdict_span_conversion_synthetic_fixture():
+    raw_line = {
+        "bbox": (10.0, 20.0, 120.0, 35.0),
+        "spans": [
+            {
+                "bbox": (10.0, 20.0, 50.0, 35.0),
+                "font": "Helvetica-Bold",
+                "size": 12.0,
+                "flags": 16,
+                "chars": [
+                    {"c": "H", "bbox": (10.0, 20.0, 20.0, 35.0), "origin": (10.0, 32.0), "synthetic": False},
+                    {"c": "i", "bbox": (20.0, 20.0, 28.0, 35.0), "origin": (20.0, 32.0), "synthetic": False},
+                    {"c": " ", "bbox": (28.0, 20.0, 34.0, 35.0), "origin": (28.0, 32.0), "synthetic": True},
+                    {"c": "★", "bbox": (34.0, 20.0, 50.0, 35.0), "origin": (34.0, 32.0), "synthetic": False},
+                ],
+            },
+            {
+                "bbox": (55.0, 20.0, 120.0, 35.0),
+                "font": "Times-Italic",
+                "size": 10.0,
+                "flags": 2,
+                "chars": [
+                    {"c": "w", "bbox": (55.0, 20.0, 65.0, 35.0), "origin": (55.0, 32.0), "synthetic": False},
+                    {"c": "o", "bbox": (65.0, 20.0, 75.0, 35.0), "origin": (65.0, 32.0), "synthetic": False},
+                    {"c": "r", "bbox": (75.0, 20.0, 85.0, 35.0), "origin": (75.0, 32.0), "synthetic": False},
+                    {"c": "l", "bbox": (85.0, 20.0, 90.0, 35.0), "origin": (85.0, 32.0), "synthetic": False},
+                    {"c": "d", "bbox": (90.0, 20.0, 100.0, 35.0), "origin": (90.0, 32.0), "synthetic": False},
+                ],
+            },
+        ],
+    }
+    line, spans = _line_from_dict(0, 0, raw_line, 0)
+    assert len(spans) == 2
+    s1, s2 = spans
+
+    assert s1.raw_text == "Hi ★"
+    assert s1.font_name == "Helvetica-Bold"
+    assert s1.bold is True
+    assert len(s1.chars) == 4
+    assert s1.chars[2].synthetic is True
+    assert s1.chars[3].text == "★"
+
+    assert s2.raw_text == "world"
+    assert s2.font_name == "Times-Italic"
+    assert s2.italic is True
+    assert len(s2.chars) == 5
+    assert all(not c.synthetic for c in s2.chars)
+
+    assert line.reconstructed_text == "Hi ★ world"
+
+
+def test_single_pass_rawdict_extraction_assertion(tmp_path, monkeypatch):
+    import traceback
+
+    path = make_pdf(tmp_path, text=(("Single Pass Verification", (72, 72)),))
+    doc = fitz.open(path)
+    page = doc[0]
+
+    foundation_calls = []
+    original_get_text = page.get_text
+
+    def tracking_get_text(opt="text", **kwargs):
+        caller = traceback.extract_stack()[-2].name
+        if caller == "build_page_layout":
+            foundation_calls.append(opt)
+        return original_get_text(opt, **kwargs)
+
+    monkeypatch.setattr(page, "get_text", tracking_get_text)
+
+    layout = build_page_layout(page, 1)
+    doc.close()
+
+    assert "dict" not in foundation_calls, "Foundation must make 0 get_text('dict') calls"
+    assert foundation_calls == ["rawdict"], "Foundation must make exactly 1 get_text('rawdict') call per page"
+    assert len(layout.spans) > 0
+    assert len(layout.spans[0].chars) > 0

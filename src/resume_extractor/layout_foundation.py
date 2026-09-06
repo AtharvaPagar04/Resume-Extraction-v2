@@ -19,7 +19,7 @@ from typing import Any, Iterable
 import pymupdf as fitz
 
 from .geometry import BBox, THRESHOLDS, bbox_height, bbox_width, center_x, center_y, intersection_ratio, normalized_x, normalized_y, same_row, union_bbox
-from .reconstruction import normalize_text, reconstruct_line_from_spans
+from .reconstruction import normalize_text, reconstruct_line_from_spans, reconstruct_line_with_provenance
 
 
 _BULLET_MARKERS = frozenset({"•", "●", "▪", "▫", "◦", "‣", "∙", "-", "–", "—", "*", "∗", "○"})
@@ -51,6 +51,32 @@ def detect_style(font_name: str, flags: int) -> tuple[bool, bool]:
     return bool(flags & 16) or any(marker in font for marker in _BOLD_NAMES), bool(flags & 2) or any(marker in font for marker in _ITALIC_NAMES)
 
 
+@dataclass(frozen=True, slots=True)
+class CharacterEvidence:
+    text: str
+    bbox: BBox
+    origin: tuple[float, float] | None = None
+    synthetic: bool = False
+
+
+def span_text_from_source_chars(chars: Iterable[CharacterEvidence]) -> str:
+    """Project raw character evidence to legacy Span.raw_text format.
+
+    Replaces isolated Unicode surrogate code points (U+D800 to U+DFFF)
+    with U+FFFD to match PyMuPDF extractDICT() UTF-8 normalization.
+    """
+    parts: list[str] = []
+    for char in chars:
+        t = char.text
+        if len(t) == 1 and 0xD800 <= ord(t) <= 0xDFFF:
+            parts.append("\ufffd")
+        elif any(0xD800 <= ord(c) <= 0xDFFF for c in t):
+            parts.append("".join("\ufffd" if 0xD800 <= ord(c) <= 0xDFFF else c for c in t))
+        else:
+            parts.append(t)
+    return "".join(parts)
+
+
 @dataclass(frozen=True)
 class Span:
     raw_text: str
@@ -66,6 +92,7 @@ class Span:
     line_index: int
     span_index: int
     source_order: tuple[int, int, int]
+    chars: tuple[CharacterEvidence, ...] = ()
 
     @property
     def x0(self) -> float:
@@ -108,6 +135,7 @@ class LayoutLine:
     is_bullet_only: bool = False
     starts_with_bullet: bool = False
     is_table: bool = False
+    char_map: tuple[CharacterEvidence | None, ...] = ()
 
     @property
     def text(self) -> str:
@@ -319,25 +347,43 @@ def _median(values: Iterable[float]) -> float:
 
 
 def _line_from_dict(block_index: int, line_index: int, raw_line: dict[str, Any], source_id: int) -> tuple[LayoutLine, tuple[Span, ...]]:
-    spans = tuple(
-        Span(
-            raw_text=str(raw_span.get("text", "")),
-            normalized_text=normalize_text(str(raw_span.get("text", ""))),
-            bbox=tuple(float(value) for value in raw_span.get("bbox", (0, 0, 0, 0))),
-            font_name=str(raw_span.get("font", "")),
-            font_size=float(raw_span.get("size", 0.0) or 0.0),
-            flags=int(raw_span.get("flags", 0) or 0),
-            bold=detect_style(str(raw_span.get("font", "")), int(raw_span.get("flags", 0) or 0))[0],
-            italic=detect_style(str(raw_span.get("font", "")), int(raw_span.get("flags", 0) or 0))[1],
-            uppercase_ratio=uppercase_ratio(str(raw_span.get("text", ""))),
-            block_index=block_index,
-            line_index=line_index,
-            span_index=span_index,
-            source_order=(block_index, line_index, span_index),
+    spans_list: list[Span] = []
+    for span_index, raw_span in enumerate(raw_line.get("spans", ())):
+        chars = tuple(
+            CharacterEvidence(
+                text=str(raw_char.get("c", "")),
+                bbox=tuple(float(value) for value in raw_char.get("bbox", (0, 0, 0, 0))),
+                origin=tuple(float(value) for value in raw_char.get("origin", ())) if "origin" in raw_char else None,
+                synthetic=bool(raw_char.get("synthetic", False)),
+            )
+            for raw_char in raw_span.get("chars", ())
         )
-        for span_index, raw_span in enumerate(raw_line.get("spans", ()))
-    )
-    reconstructed = reconstruct_line_from_spans(list(raw_line.get("spans", ())))
+        if chars:
+            raw_text = span_text_from_source_chars(chars)
+        else:
+            raw_text = str(raw_span.get("text", ""))
+
+        spans_list.append(
+            Span(
+                raw_text=raw_text,
+                normalized_text=normalize_text(raw_text),
+                bbox=tuple(float(value) for value in raw_span.get("bbox", (0, 0, 0, 0))),
+                font_name=str(raw_span.get("font", "")),
+                font_size=float(raw_span.get("size", 0.0) or 0.0),
+                flags=int(raw_span.get("flags", 0) or 0),
+                bold=detect_style(str(raw_span.get("font", "")), int(raw_span.get("flags", 0) or 0))[0],
+                italic=detect_style(str(raw_span.get("font", "")), int(raw_span.get("flags", 0) or 0))[1],
+                uppercase_ratio=uppercase_ratio(raw_text),
+                block_index=block_index,
+                line_index=line_index,
+                span_index=span_index,
+                source_order=(block_index, line_index, span_index),
+                chars=chars,
+            )
+        )
+    spans = tuple(spans_list)
+    projection = reconstruct_line_with_provenance(spans)
+    reconstructed = projection.text
     raw_text = "".join(span.raw_text for span in spans)
     sizes = [span.font_size for span in spans if span.font_size]
     weights = [max(1, len(span.normalized_text)) for span in spans]
@@ -365,6 +411,7 @@ def _line_from_dict(block_index: int, line_index: int, raw_line: dict[str, Any],
         ends_with_colon=reconstructed.endswith(":"),
         is_bullet_only=is_bullet_only(reconstructed),
         starts_with_bullet=starts_with_bullet(reconstructed),
+        char_map=projection.char_map,
     ), spans
 
 
@@ -498,7 +545,7 @@ def _hyperlinks(page: fitz.Page, page_number: int) -> tuple[LayoutHyperlink, ...
 def build_page_layout(page: fitz.Page, page_number: int) -> PageLayout:
     """Extract one immutable, source-accounted page geometry model."""
     width, height = float(page.rect.width), float(page.rect.height)
-    data = page.get_text("dict", flags=fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_PRESERVE_WHITESPACE)
+    data = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_PRESERVE_WHITESPACE)
     blocks: list[LayoutBlock] = []
     lines: list[LayoutLine] = []
     spans: list[Span] = []

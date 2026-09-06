@@ -22,17 +22,117 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-# Major resume section pattern headings
-SECTION_PATTERNS = [
-    ("summary", re.compile(r"^(?:professional\s+summary|summary|profile|about\s+me|career\s+objective|objective)$", re.I)),
-    ("experience", re.compile(r"^(?:work\s+experience|professional\s+experience|experience|employment\s+history|work\s+history|total\s+experience)$", re.I)),
-    ("education", re.compile(r"^(?:education|academic\s+background|educational\s+qualifications|academics)$", re.I)),
-    ("skills", re.compile(r"^(?:technical\s+skills|skills\s*(?:&|and)\s*abilities|core\s+competencies|key\s+skills|skills|technologies)$", re.I)),
-    ("projects", re.compile(r"^(?:projects|key\s+projects|academic\s+projects|project\s+experience)$", re.I)),
-    ("certifications", re.compile(r"^(?:certifications|certificates|licenses\s*(?:&|and)\s*certifications)$", re.I)),
-    ("awards", re.compile(r"^(?:awards|honors|achievements|awards\s*(?:&|and)\s*achievements)$", re.I)),
-    ("personal_details", re.compile(r"^(?:personal\s+details|personal\s+information|personal\s+skills|declaration)$", re.I)),
+# Authoritative single source of truth for standard resume section heading forms
+SECTION_HEADING_FORMS: dict[str, tuple[str, ...]] = {
+    "summary": (
+        "professional summary",
+        "summary",
+        "profile",
+        "about me",
+        "career objective",
+        "objective",
+    ),
+    "experience": (
+        "work experience",
+        "professional experience",
+        "experience",
+        "employment history",
+        "work history",
+        "total experience",
+    ),
+    "education": (
+        "education",
+        "academic background",
+        "educational qualifications",
+        "academics",
+    ),
+    "skills": (
+        "technical skills",
+        "skills & abilities",
+        "skills and abilities",
+        "core competencies",
+        "key skills",
+        "skills",
+        "technologies",
+    ),
+    "projects": (
+        "projects",
+        "key projects",
+        "academic projects",
+        "project experience",
+    ),
+    "certifications": (
+        "certifications",
+        "certificates",
+        "licenses & certifications",
+        "licenses and certifications",
+    ),
+    "awards": (
+        "awards",
+        "honors",
+        "achievements",
+        "awards & achievements",
+        "awards and achievements",
+    ),
+    "personal_details": (
+        "personal details",
+        "personal information",
+        "personal skills",
+        "declaration",
+    ),
+}
+
+
+def _form_to_regex(form: str) -> str:
+    """Convert a literal heading form to regex with token-aware whitespace and connector handling."""
+    tokens = form.split()
+    if not tokens:
+        return ""
+    connector_tokens = {"&", "and"}
+    pat = re.escape(tokens[0])
+    for i in range(1, len(tokens)):
+        curr_token = tokens[i]
+        prev_token = tokens[i - 1]
+        if curr_token in connector_tokens or prev_token in connector_tokens:
+            sep = r"\s*"
+        else:
+            sep = r"\s+"
+        pat += sep + re.escape(curr_token)
+    return pat
+
+
+
+# Major resume section pattern headings (derived directly from SECTION_HEADING_FORMS)
+SECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    (sec, re.compile("^(?:" + "|".join(_form_to_regex(f) for f in forms) + ")$", re.I))
+    for sec, forms in SECTION_HEADING_FORMS.items()
 ]
+
+
+def _build_whitespace_free_heading_map(
+    heading_forms: dict[str, tuple[str, ...]],
+) -> dict[str, str]:
+    """Map whitespace-free key to its canonical accepted surface form, validating uniqueness."""
+    key_to_form: dict[str, str] = {}
+    key_to_section: dict[str, str] = {}
+    for sec_name, forms in heading_forms.items():
+        for form in forms:
+            key = re.sub(r"\s+", "", form).lower()
+            if key in key_to_section:
+                existing_sec = key_to_section[key]
+                if existing_sec != sec_name:
+                    raise ValueError(
+                        f"Cross-bucket collision for key '{key}': maps to '{existing_sec}' and '{sec_name}'"
+                    )
+            key_to_form[key] = form
+            key_to_section[key] = sec_name
+    return key_to_form
+
+
+# Precomputed whitespace-free heading reconstruction map (derived directly from SECTION_HEADING_FORMS)
+SECTION_WHITESPACE_FREE_MAP: dict[str, str] = _build_whitespace_free_heading_map(
+    SECTION_HEADING_FORMS
+)
 
 
 def clean_text_content(text: str) -> str:
@@ -67,6 +167,39 @@ def normalize_phone_number(phone: str) -> str:
     return phone
 
 
+def normalize_heading_candidate(line: str) -> str:
+    """Normalize a potential section heading candidate by stripping at most one terminal colon or period."""
+    candidate = line.strip()
+    if candidate.endswith((":", ".")):
+        candidate = candidate[:-1].rstrip()
+    return candidate
+
+
+def normalize_letter_spaced_heading_candidate(candidate: str) -> str:
+    """Normalize a potential heading candidate consisting entirely of single alphabetic characters."""
+    tokens = candidate.split()
+    if len(tokens) < 3:
+        return candidate
+    if not all(len(token) == 1 and token.isalpha() for token in tokens):
+        return candidate
+    return "".join(tokens)
+
+
+def reconstruct_multi_word_letter_spaced_heading_candidate(candidate: str) -> str:
+    """Reconstruct a multi-word letter-spaced candidate to its accepted surface form.
+
+    Inspects the entire candidate. If all whitespace-separated tokens are single
+    alphabetic characters (>= 3 tokens), checks if its whitespace-free key matches
+    an existing accepted heading surface form. If so, returns that accepted surface form;
+    otherwise, returns the candidate unchanged.
+    """
+    tokens = candidate.split()
+    if len(tokens) < 3 or not all(len(t) == 1 and t.isalpha() for t in tokens):
+        return candidate
+    key = "".join(tokens).lower()
+    return SECTION_WHITESPACE_FREE_MAP.get(key, candidate)
+
+
 def split_into_sections(text: str) -> dict[str, list[str]]:
     """Deterministically segment text into standard resume sections with list-of-lines formatting."""
     lines = text.split("\n")
@@ -77,10 +210,22 @@ def split_into_sections(text: str) -> dict[str, list[str]]:
         stripped = line.strip()
         matched_section = None
         if stripped and len(stripped) <= 60:
+            candidate = normalize_heading_candidate(stripped)
+            # 1. Existing patterns match (covers normal headings + single-word letter spacing)
+            single_word_cand = normalize_letter_spaced_heading_candidate(candidate)
             for sec_name, pattern in SECTION_PATTERNS:
-                if pattern.match(stripped):
+                if pattern.match(single_word_cand):
                     matched_section = sec_name
                     break
+
+            # 2. Multi-word letter-spacing reconstruction
+            if not matched_section:
+                reconstructed = reconstruct_multi_word_letter_spaced_heading_candidate(candidate)
+                if reconstructed != candidate:
+                    for sec_name, pattern in SECTION_PATTERNS:
+                        if pattern.match(reconstructed):
+                            matched_section = sec_name
+                            break
 
         if matched_section:
             current_section = matched_section
